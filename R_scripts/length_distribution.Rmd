@@ -1,0 +1,1028 @@
+---
+title: "Isoseq mice data transcript models length exploration, bias correction and RBN correlation"
+author: Carlos Blanco
+output:
+  html_document:
+    toc: true
+    number_sections: true
+    toc_float: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+In this report I show the transcript models length distributions of each
+pool and combined.
+
+```{r}
+library(data.table)
+library(stringr)
+library(ggplot2)
+library(dplyr)
+library(RColorConesa)
+library(NOISeq)
+library(tidyr)
+library(gridExtra)
+library(ggpubr)
+```
+
+# First analysis: all transcript models length distribution
+
+In this first length distribution analysis we will observe the length
+distributions of the transcript models in all samples in pool 1 and pool
+2 separately (regardless if the transcript models are also shared by the
+other pool), and then combined (the union)
+
+## Data preparation
+
+```{r}
+files <- list.files(path = "/home/carblan/Documents/R_files/TFM/filtered_classifications", pattern = "^B", full.names = TRUE)
+pool_1_files <- as.list(files[str_detect(basename(files), "^B3[1-3]|^B15[1-2]")])
+pool_2_files <- as.list(files[str_detect(basename(files), "^B3[4-5]|^B15[3-4]")])
+```
+
+## Pool 1
+
+```{r}
+# Crear un vector vacío para almacenar los valores de la columna 'length' de todas las tablas
+length_values_pool1 <- c()
+
+# Iterar sobre cada file en la lista 'tablas'
+for (file in pool_1_files) {
+  # Extraer los valores de la columna 'length' del file actual y agregarlos al vector 'length_values'
+  data <- read.table(file, header = TRUE)
+  data <- data %>% filter(!grepl("Artifact", filter_result))
+  length_values_pool1 <- c(length_values_pool1, data$length)
+}
+```
+
+## Pool 2
+
+```{r}
+# Crear un vector vacío para almacenar los valores de la columna 'length' de todas las tablas
+length_values_pool2 <- c()
+
+# Iterar sobre cada file en la lista 'tablas'
+for (file in pool_2_files) {
+  # Extraer los valores de la columna 'length' del file actual y agregarlos al vector 'length_values'
+  data <- read.table(file, header = TRUE)
+  data <- data %>% filter(!grepl("Artifact", filter_result))
+  length_values_pool2 <- c(length_values_pool2, data$length)
+}
+```
+
+## Both pools (union)
+
+```{r}
+both_pools_files <- as.list(files)
+
+# Crear un vector vacío para almacenar los valores de la columna 'length' de todas las tablas
+length_values_both_pools <- c()
+
+# Iterar sobre cada file en la lista 'tablas'
+for (file in both_pools_files) {
+  # Extraer los valores de la columna 'length' del file actual y agregarlos al vector 'length_values'
+  data <- read.table(file, header = TRUE)
+  data <- data %>% filter(!grepl("Artifact", filter_result))
+  length_values_both_pools <- c(length_values_both_pools, data$length)
+}
+```
+
+## Boxplot
+
+```{r}
+combined_df <- data.frame(
+  pool = c(rep("Pool 1", length(length_values_pool1)),
+       	rep("Pool 2", length(length_values_pool2)),
+       	rep("Both Pools", length(length_values_both_pools))),
+  length = c(length_values_pool1, length_values_pool2, length_values_both_pools)
+)
+
+# Trazar el boxplot con ggplot
+ggplot(combined_df, aes(x = pool, y = length, fill = pool)) +
+  geom_violin(alpha = 0.5) +
+  geom_boxplot(width = 0.2, outlier.shape = NA) +
+  labs(title = "Transcript models length distribution per pool",
+   	x = "Pool",
+   	y = "Transcript model lenght",
+   	fill = "Pool") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_fill_conesa(palette = "main")
+```
+
+
+
+# Second analysis: exclusive UJCs length distribution and intersection between both pools
+
+```{r}
+# First function, isoformTags, takes the junctions file given by SQANTI3 QC and
+# generates a df with the isoforms id and the UJC)
+isoformTags <- function(junctions_file) {
+  df_file <- read.table(junctions_file , header = TRUE, sep = "\t")
+  df <- df_file[, c("isoform", "chrom", "strand")] # df with isoforms in *junctions.txt
+  dt <- data.table::data.table(df)
+  dt <- dt[,coord:=paste0(df_file$genomic_start_coord, "_", df_file$genomic_end_coord)]
+  dt <- dt[, list(tagcoord = paste0(coord, collapse = "_")),
+       	by = c("isoform", "chrom", "strand")]
+  df <- as.data.frame(dt)
+  df$LRGASP_id <- paste(df$chrom, df$strand, df$tagcoord, sep = "_")
+  tag_df <- df[,c("isoform", "LRGASP_id")]
+  muestra <- sub("_.*", "", basename(junctions_file))
+  nombre_df <- paste0(muestra, "_transcript_models_UJCs.txt")
+  write.table(tag_df, file.path("/home/carblan/Documents/R_files/TFM/UJCs_transcript_models", file = nombre_df), sep="\t", row.names=FALSE)
+}
+
+junctions_files_paths <- list.files(path = "/home/carblan/Documents/R_files/TFM/junctions_files", pattern = "B", full.names = TRUE)
+
+for (file_path in junctions_files_paths) {
+  isoformTags(file_path)
+}
+
+
+# The second function merges the classification file with the junction file
+# to add the info of the UJC of each transcript to the classification file.
+# Returns a list with a df for each sample.
+read_and_process_data <- function(class_files_paths, ujc_files_paths) {
+  class_df_list <- list()
+  for (i in 1:length(class_files_paths)) {
+	class_file <- class_files_paths[i]
+	sample_name <- sub("_.*", "", basename(class_file))
+    
+	# Read classification file
+	class_df <- read.table(class_file, header = TRUE, sep = "\t")
+    
+	# Find the UJCs file corresponding to the sample
+	ujc_file <- ujc_files_paths[grep(sample_name, ujc_files_paths)]
+    
+	# Read UJCs df
+	ujc_df <- read.table(ujc_file, header = TRUE, sep = "\t")
+    
+	# Merge by isoform
+	merged_df <- merge(class_df, ujc_df, by = "isoform", all = FALSE, sort = TRUE)
+	merged_df$sample <- sample_name
+	# Add the df to the list
+	class_df_list[[sample_name]] <- merged_df
+  }
+ 
+  return(class_df_list)
+}
+
+# Obtain both classification and UJCs files paths
+ujc_files_paths <- list.files(path = "/home/carblan/Documents/R_files/TFM/UJCs_transcript_models", pattern = "B", full.names = TRUE)
+class_files_paths <- list.files(path = "/home/carblan/Documents/R_files/TFM/filtered_classifications", pattern = "B", full.names = TRUE)
+
+class_df_list <- read_and_process_data(class_files_paths, ujc_files_paths)
+```
+
+## Both pools (intersection)
+
+```{r}
+# This generates a final df with the UJCs shared by all samples, ignoring the
+# NAs (mono exons, artifacts and UJCs no shared by all samples).
+all_ujcs <- lapply(class_df_list, function(df) df$LRGASP_id)
+common_ujcs <- Reduce(intersect, all_ujcs)
+
+# Filtrar cada dataframe para obtener solo las filas con LRGASP_id comunes y sin "Artifact" en filter_result
+common_ujcs_dfs <- lapply(class_df_list, function(df) {
+  df[df$LRGASP_id %in% common_ujcs & (df$filter_result != "Artifact"), ]
+})
+
+# Combinar los dataframes
+intersection_ujcs_df <- do.call(rbind, common_ujcs_dfs)
+```
+
+## Pool 1 and 2 exclusive UJCs
+
+```{r}
+# Now that we have the intersection of ujcs (ujcs shared by all the samples in
+# both pools), we need the ujcs exclusive to each pool.
+
+# Paso 1: Separar los dataframes en función de la pool
+pool1_dfs <- list()
+pool2_dfs <- list()
+pool1_samples <- c("B31", "B32", "B33", "B151", "B152")
+pool2_samples <- c("B34", "B35", "B153", "B154")
+
+for (i in seq_along(class_df_list)) {
+  df <- class_df_list[[i]]
+  sample_name <- unique(df$sample)
+  if (sample_name %in% pool1_samples) {
+	df <- df[!df$filter_result == "Artifact", ]
+	pool1_dfs[[sample_name]] <- df
+  } else if (sample_name %in% pool2_samples) {
+	df <- df[!df$filter_result == "Artifact", ]  
+	pool2_dfs[[sample_name]] <- df
+  }
+}
+
+# Paso 2: Obtener LRGASP_id exclusivos para cada pool
+# Step 2: Obtain the UJCs
+pool1_shared_ids <- Reduce(intersect, lapply(pool1_dfs, function(df) df$LRGASP_id))
+pool2_shared_ids <- Reduce(intersect, lapply(pool2_dfs, function(df) df$LRGASP_id))
+
+pool1_exclusive_ids <- pool1_shared_ids[!pool1_shared_ids %in% Reduce(union, lapply(pool2_dfs, function(df) df$LRGASP_id))]
+pool2_exclusive_ids <- pool2_shared_ids[!pool2_shared_ids %in% Reduce(union, lapply(pool1_dfs, function(df) df$LRGASP_id))]
+
+
+# Step 3: Obtain the transcript models/UJCs exclusive for each pool and add a pool column to the dfs
+pool1_exclusive_rows <- lapply(pool1_dfs, function(df) {
+  transform(subset(df, LRGASP_id %in% pool1_exclusive_ids), pool = 1)
+})
+
+pool2_exclusive_rows <- lapply(pool2_dfs, function(df) {
+  transform(subset(df, LRGASP_id %in% pool2_exclusive_ids), pool = 2)
+})
+
+# Step 4: combine all dfs
+final_df <- do.call(rbind, c(pool1_exclusive_rows, pool2_exclusive_rows))
+intersection_ujcs_df$pool <- "Intersection"
+
+# Concatenar intersection_ujcs_df con final_df
+combined_df <- rbind(intersection_ujcs_df, final_df)
+```
+
+## Boxplots
+
+```{r}
+# Length Boxplots
+ggplot() +
+  geom_violin(data = combined_df, aes(x = factor(pool), y = length, fill = factor(pool)), alpha = 0.5) +
+  geom_boxplot(data = combined_df, aes(x = factor(pool), y = length, fill = factor(pool)), width = 0.2, outlier.shape = NA) +
+  labs(title = "UJCs length distribution per pool",
+   	x = "Pool",
+   	y = "Transcript model length",
+   	fill = "Pool") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_fill_conesa(palette = "main")
+
+# Counts Boxplots
+# First
+ggplot() +
+  geom_violin(data = combined_df, aes(x = factor(pool), y = FL, fill = factor(pool)), alpha = 0.5) +
+  geom_boxplot(data = combined_df, aes(x = factor(pool), y = FL, fill = factor(pool)), width = 0.2, outlier.shape = NA) +
+  labs(title = "UJCs count distribution per pool",
+   	x = "Pool",
+   	y = "Transcript model raw counts",
+   	fill = "Pool") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ylim(c(0, 30)) +
+  scale_fill_conesa(palette = "main")
+```
+
+# Length Bias (my pipeline):
+
+## Individual samples:
+
+```{r, results = 'hide'}
+layout(mat = matrix(c(5, 0, 6, 1, 7, 2, 8, 3, 9, 4), 
+                    nrow = 2, ncol = 5),
+       heights = c(2, 2, 2, 2, 2),
+       widths = c(2, 2, 2, 2, 2))     
+for (file in files) {
+  data <- read.table(file, header = TRUE)
+  data <- data %>% filter(!grepl("Artifact", filter_result))
+  muestra <- sub("_.*", "", basename(file))
+  mycounts <- data.frame(FL = data$FL)
+  rownames(mycounts) <- data$isoform
+  names(mycounts) <- muestra
+  myfactors <- data.frame(Sample = muestra)
+  mylengths <- split(data$length, data$isoform)
+  mydata <- readData(data = mycounts, length = mylengths, factors = myfactors)
+  mylengthbias = dat(mydata, factor = "Sample", type = "lengthbias")
+  explo.plot(mylengthbias, samples = NULL, norm = FALSE, toplot = "global")
+}
+```
+
+
+## Merged transcriptome (tama collapse, then tama merge of the brain samples):
+
+```{r, results = 'hide'}
+merged_classification <- "/home/carblan/Documents/R_files/TFM/filtered_classifications/brain_merged_transcriptome_classification.txt"
+merged_data <- read.table(merged_classification, header = TRUE)
+counts_file_merged <- "/home/carblan/Documents/R_files/TFM/fl_counts/merged_filtered_samples.counts.tsv"
+mycounts_merged <- read.table(counts_file_merged, header = TRUE)
+rownames(mycounts_merged) <- mycounts_merged$transcript_id
+mycounts_merged <- mycounts_merged[,2:ncol(mycounts_merged)]
+myfactors_merged <- data.frame(Tissue = c("Brain", "Brain", "Brain", "Brain", "Brain", "Brain", "Brain", "Brain", "Brain"), Pool = c("1", "1", "2", "2", "1", "1", "1", "2", "2"), Age_group = c(rep("old", 4), rep("young", 5)), Sample = c("B151", "B152", "B153", "B154", "B31", "B32", "B33", "B34", "B35"))
+mylengths_merged <- split(merged_data$length, merged_data$isoform)
+mydata_merged <- NOISeq::readData(data = mycounts_merged, length = mylengths_merged, factors = myfactors_merged)
+mylengthbias_merged = dat(mydata_merged, factor = "Sample", type = "lengthbias", norm = FALSE)
+layout(mat = matrix(c(5, 0, 6, 1, 7, 2, 8, 3, 9, 4), 
+                    nrow = 2, ncol = 5),
+       heights = c(2, 2, 2, 2, 2),
+       widths = c(2, 2, 2, 2, 2))           
+for (i in 1:ncol(mydata_merged)){
+  explo.plot(mylengthbias_merged, samples = i, toplot = "global", xlim=c(0,10000))
+}
+```
+
+# Length bias correction (my pipeline):
+
+```{r, results = 'hide'}
+# Correction function
+lengthLoess <- function(counts,length) {
+  ff <- function(y,x) {
+	xx <- x[(y>0)&(y<=quantile(y,probs=0.99))]
+	yy <- log(y[(y>0)&(y<=quantile(y,probs=0.99))])
+	l <- loess(yy~xx)
+	y.fit <- predict(l,newdata=x)
+	names(y.fit) <- names(y)
+	y.fit[is.na(y.fit)] <- 0
+	retval <- y/exp(y.fit-median(yy))
+	return(retval)
+  }
+  apply(counts,2,ff,x=length)
+}
+```
+
+## Individual samples
+
+```{r, results = 'hide'}
+layout(mat = matrix(c(5, 0, 6, 1, 7, 2, 8, 3, 9, 4), 
+                    nrow = 2, ncol = 5),
+       heights = c(2, 2, 2, 2, 2),
+       widths = c(2, 2, 2, 2, 2))        
+for (file in files) {
+  data <- read.table(file, header = TRUE)
+  data <- data %>% filter(!grepl("Artifact", filter_result))
+  muestra <- sub("_.*", "", basename(file))
+  counts <- data.frame(FL = data$FL)
+  rownames(counts) <- data$isoform
+  names(counts) <- muestra
+  myfactors <- data.frame(Sample = muestra)
+  lengths <- data$length
+  mycounts <- lengthLoess(counts, lengths)
+  mylengths <- split(data$length, data$isoform)
+  mydata <- NOISeq::readData(data = mycounts, length = mylengths, factors = myfactors)
+  mylengthbias = dat(mydata, factor = "Sample", type = "lengthbias")
+  explo.plot(mylengthbias, samples = NULL, norm = FALSE, toplot = "global")
+}
+```
+
+## Merged transcriptome (tama collapse, then tama merge of the brain samples):
+
+```{r, results = 'hide'}
+lengths_merged <- merged_data$length
+corrected_mycounts_merged <- lengthLoess(mycounts_merged, lengths_merged)
+corrected_mylengths_merged <- split(merged_data$length, merged_data$isoform)
+corrected_mydata_merged <- NOISeq::readData(data = corrected_mycounts_merged, length = corrected_mylengths_merged, factors = myfactors_merged)
+corrected_mylengthbias_merged = dat(corrected_mydata_merged, factor = "Sample", type = "lengthbias", norm = TRUE)
+layout(mat = matrix(c(5, 0, 6, 1, 7, 2, 8, 3, 9, 4), 
+                    nrow = 2, ncol = 5),
+       heights = c(2, 2, 2, 2, 2),
+       widths = c(2, 2, 2, 2, 2))          
+for (i in 1:ncol(corrected_mydata_merged)){
+  explo.plot(corrected_mylengthbias_merged, samples = i, toplot = "global", xlim=c(0,10000))
+}
+```
+
+# Length bias (Alejandro's pipeline):
+
+## Individual samples:
+
+```{r, results = 'hide'}
+alejandro_clas <- list.files(path="/home/carblan/Documents/R_files/TFM/alejandro_filtered_classifications", pattern="B3[1-5]|B15[1-4]", full.names = TRUE)
+
+layout(mat = matrix(c(5, 0, 6, 1, 7, 2, 8, 3, 9, 4), 
+                    nrow = 2, ncol = 5),
+       heights = c(2, 2, 2, 2, 2),
+       widths = c(2, 2, 2, 2, 2))    
+for (file in alejandro_clas) {
+  data <- read.table(file, header = TRUE)
+  data <- data %>% filter(!grepl("Artifact", filter_result))
+  muestra <- sub("_.*", "", basename(file))
+  mycounts <- data.frame(FL = data$FL)
+  rownames(mycounts) <- data$isoform
+  names(mycounts) <- muestra
+  myfactors <- data.frame(Sample = muestra)
+  mylengths <- split(data$length, data$isoform)
+  mydata <- NOISeq::readData(data = mycounts, length = mylengths, factors = myfactors)
+  mylengthbias = dat(mydata, factor = "Sample", type = "lengthbias", norm = FALSE)
+  explo.plot(mylengthbias, samples = NULL, toplot = "global")
+}
+```
+
+## Merged transcriptome (Brain and Kidney young data):
+
+### Data preparation
+
+```{r}
+alejandro_merged_clas <- read.table("/home/carblan/Documents/R_files/TFM/alejandro_filtered_classifications/BK_rules_classification.txt", head = TRUE)
+alejandro_merged_transcriptome_counts <- read.table("/home/carblan/Documents/R_files/TFM/alejandro_filtered_classifications/mouse_isoseq_ind_BK_rules.counts.tsv", head = TRUE)
+```
+
+### Brain and kidney (with 0s)
+
+```{r, results = 'hide'}
+#BOTH DATA
+mycounts <- alejandro_merged_transcriptome_counts[, 2:ncol(alejandro_merged_transcriptome_counts)]
+rownames(mycounts) <- alejandro_merged_transcriptome_counts$transcript_id
+myfactors <- data.frame(Sample = c("K31", "K32", "K33", "K34", "K35", "B31", "B32", "B33", "B34", "B35"), Tissue = c("Kidney", "Kidney", "Kidney", "Kidney", "Kidney", "Brain", "Brain", "Brain", "Brain", "Brain"), Pool = c("1", "1", "1", "2", "2", "1", "1", "1", "2", "2"))
+mylengths <- split(alejandro_merged_clas$length, alejandro_merged_clas$isoform)
+mydata <- NOISeq::readData(data = mycounts, length = mylengths, factors = myfactors)
+mylengthbias = dat(mydata, factor = "Sample", norm = FALSE, type = "lengthbias")
+layout(mat = matrix(c(1, 6, 2, 7, 3, 8, 4, 9, 5, 10), 
+                    nrow = 2, ncol = 5),
+       heights = c(2, 2, 2, 2, 2),
+       widths = c(2, 2, 2, 2, 2))      
+for (i in 1:ncol(mydata)){
+  explo.plot(mylengthbias, samples = i, toplot = "global", xlim=c(0,10000))
+}
+mylengthbias = dat(mydata, factor = "Pool", norm = FALSE, type = "lengthbias")
+explo.plot(mylengthbias, samples = NULL, toplot = "global")
+```
+
+### Brain (with 0s)
+
+```{r, results = 'hide'}
+#BOTH DATA
+mycounts <- alejandro_merged_transcriptome_counts[, 7:ncol(alejandro_merged_transcriptome_counts)]
+rownames(mycounts) <- alejandro_merged_transcriptome_counts$transcript_id
+myfactors <- data.frame(Sample = c("B31", "B32", "B33", "B34", "B35"), Tissue = c("Brain", "Brain", "Brain", "Brain", "Brain"), Pool = c("1", "1", "1", "2", "2"))
+mylengths <- split(alejandro_merged_clas$length, alejandro_merged_clas$isoform)
+mydata <- NOISeq::readData(data = mycounts, length = mylengths, factors = myfactors)
+mylengthbias = dat(mydata, factor = "Sample", norm = FALSE, type = "lengthbias")
+layout(mat = matrix(c(1, 2, 3, 4, 5), 
+                    nrow = 1, ncol = 5),
+       heights = c(2, 2, 2, 2, 2),
+       widths = c(2, 2, 2, 2, 2))    
+for (i in 1:5) {
+  explo.plot(mylengthbias, samples = i)
+}
+mylengthbias = dat(mydata, factor = "Pool", norm = FALSE, type = "lengthbias")
+explo.plot(mylengthbias, samples = NULL, toplot = "global")
+```
+
+### Brain and kidney (without 0s)
+
+```{r, results = 'hide'}
+#BOTH DATA
+mycounts <- alejandro_merged_transcriptome_counts[, 2:ncol(alejandro_merged_transcriptome_counts)]
+rownames(mycounts) <- alejandro_merged_transcriptome_counts$transcript_id
+myfactors <- data.frame(Sample = c("K31", "K32", "K33", "K34", "K35", "B31", "B32", "B33", "B34", "B35"), Tissue = c("Kidney", "Kidney", "Kidney", "Kidney", "Kidney", "Brain", "Brain", "Brain", "Brain", "Brain"), Pool = c("1", "1", "1", "2", "2", "1", "1", "1", "2", "2"))
+mylengths <- split(alejandro_merged_clas$length, alejandro_merged_clas$isoform)
+mydata <- NOISeq::readData(data = mycounts, length = mylengths, factors = myfactors)
+mylengthbias = dat(mydata, factor = "Sample", norm = FALSE, type = "lengthbias")
+layout(mat = matrix(c(1, 6, 2, 7, 3, 8, 4, 9, 5, 10), 
+                    nrow = 2, ncol = 5),
+       heights = c(2, 2, 2, 2, 2),
+       widths = c(2, 2, 2, 2, 2))      
+for (i in 1:ncol(mydata)){
+  explo.plot(mylengthbias, samples = i, toplot = "global", xlim=c(0,10000))
+}
+mylengthbias = dat(mydata, factor = "Pool", norm = FALSE, type = "lengthbias")
+explo.plot(mylengthbias, samples = NULL, toplot = "global")
+```
+
+### Brain (without 0s)
+
+```{r, results = 'hide'}
+#BOTH DATA
+mycounts <- alejandro_merged_transcriptome_counts[, 7:ncol(alejandro_merged_transcriptome_counts)]
+rownames(mycounts) <- alejandro_merged_transcriptome_counts$transcript_id
+myfactors <- data.frame(Sample = c("B31", "B32", "B33", "B34", "B35"), Tissue = c("Brain", "Brain", "Brain", "Brain", "Brain"), Pool = c("1", "1", "1", "2", "2"))
+mylengths <- split(alejandro_merged_clas$length, alejandro_merged_clas$isoform)
+mydata <- NOISeq::readData(data = mycounts, length = mylengths, factors = myfactors)
+mylengthbias = dat(mydata, factor = "Sample", norm = FALSE, type = "lengthbias")
+layout(mat = matrix(c(1, 2, 3, 4, 5), 
+                    nrow = 1, ncol = 5),
+       heights = c(2, 2, 2, 2, 2),
+       widths = c(2, 2, 2, 2, 2))    
+for (i in 1:5) {
+  explo.plot(mylengthbias, samples = i)
+}
+mylengthbias = dat(mydata, factor = "Pool", norm = FALSE, type = "lengthbias")
+explo.plot(mylengthbias, samples = NULL, toplot = "global")
+```
+
+# Length bias correction (Alejandro's pipeline):
+
+## Merged transcriptome
+
+### Brain and kidney (with 0s)
+
+```{r, results = 'hide'}
+mycounts <- alejandro_merged_transcriptome_counts[, 2:ncol(alejandro_merged_transcriptome_counts)]
+lengths <- alejandro_merged_clas$length
+corrected_mycounts <- lengthLoess(mycounts, lengths)
+rownames(corrected_mycounts) <- alejandro_merged_transcriptome_counts$transcript_id
+mylengths <- split(alejandro_merged_clas$length, alejandro_merged_clas$isoform)
+myfactors <- data.frame(Sample = c("K31", "K32", "K33", "K34", "K35", "B31", "B32", "B33", "B34", "B35"), Tissue = c("Kidney", "Kidney", "Kidney", "Kidney", "Kidney", "Brain", "Brain", "Brain", "Brain", "Brain"), Pool = c("1", "1", "1", "2", "2", "1", "1", "1", "2", "2"))
+mydata <- NOISeq::readData(data = corrected_mycounts, length = mylengths, factors = myfactors)
+mylengthbias = dat(mydata, factor = "Pool", norm = TRUE, type = "lengthbias")
+explo.plot(mylengthbias, samples = NULL, toplot = "global")
+mylengthbias = dat(mydata, factor = "Sample", norm = TRUE, type = "lengthbias")
+layout(mat = matrix(c(1, 6, 2, 7, 3, 8, 4, 9, 5, 10), 
+                    nrow = 2, ncol = 5),
+       heights = c(2, 2, 2, 2, 2),
+       widths = c(2, 2, 2, 2, 2))    
+for (i in 1:ncol(mydata)) {
+  explo.plot(mylengthbias, samples = i)
+}
+```
+
+
+# length distribution (transcript models):
+
+```{r}
+files <- list.files(path = "/home/carblan/Documents/R_files/TFM/filtered_per_gene_classifications",
+                	full.names = TRUE)
+
+filtered_data <- list()
+
+for (file in files) {
+  data <- read.table(file, header=TRUE, stringsAsFactors=FALSE)
+
+  data <- data[data$full_splice_match_counts >= 10,]
+
+  filtered_data[[file]] <- data
+}
+
+associated_genes <- Reduce(intersect, lapply(filtered_data, function(x) x$associated_gene))
+
+filter_dataframe <- function(file, associated_genes) {
+  df <- read.table(file, header = TRUE)
+  df <- df[df$filter_result != "Artifact", ]
+  df <- df[df$associated_gene %in% associated_genes, ]
+  df$sample <- sub("_.*", "", basename(file))
+  return(df)
+}
+
+files <- list.files(path = "/home/carblan/Documents/R_files/TFM/filtered_classifications", pattern = "B", full.names = TRUE)
+filtered_dfs <- lapply(files, filter_dataframe, associated_genes)
+
+combined_df <- bind_rows(filtered_dfs)
+combined_df$group <- ifelse(combined_df$sample %in% c("B151", "B152", "B153", "B154"), "old", "young")
+combined_df$pool <- ifelse(combined_df$sample %in% c("B31", "B32", "B33", "B151", "B152"), "pool 1", "pool 2")
+samples_order <- c("B31", "B32", "B33", "B151", "B152", "B34", "B35", "B153", "B154")
+combined_df$sample <- factor(combined_df$sample, levels = samples_order)
+
+
+p <- ggplot(combined_df, aes(x = sample, y = length, fill = group, color = group)) +
+  geom_violin(alpha = 0.3) +
+  geom_boxplot(alpha = 0.5, width = 0.5, outlier.shape = NA) + 
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main") +
+  labs(x = "Sample", y = "Transcript model length") +
+  theme_minimal() +
+  my_theme
+
+ggsave("pacbio_filtered_transcript_models_length_distribution.png", p, path = "/home/carblan/Documents/R_files/TFM/figures/Length_bias", width = 10, height = 7)
+
+
+p <- ggplot(combined_df, aes(x = pool, y = length, fill = pool, color = pool)) +
+  geom_violin(alpha = 0.3) +
+  geom_boxplot(alpha = 0.5, width = 0.5, outlier.shape = NA) + 
+  scale_fill_conesa(palette = "warm") +
+  scale_color_conesa(palette = "warm") +
+  labs(x = "Sample", y = "Transcript model length") +
+  theme_minimal() +
+  my_theme +
+  stat_compare_means( aes(label = ..p.signif..), 
+                        label.x = 1.5, hide.ns = TRUE, method = "t.test", show.legend=FALSE)
+
+ggsave("pacbio_filtered_transcript_models_length_distribution.png", p, path = "/home/carblan/Documents/R_files/TFM/figures/Length_bias", width = 10, height = 7)
+
+```
+
+# length distribution (reads):
+
+```{r}
+files <- list.files(path = "/home/carblan/Documents/R_files/TFM/filtered_per_gene_classifications",
+                	full.names = TRUE)
+
+filtered_data <- list()
+
+for (file in files) {
+  data <- read.table(file, header=TRUE, stringsAsFactors=FALSE)
+
+  data <- data[data$full_splice_match_counts >= 10,]
+
+  filtered_data[[file]] <- data
+}
+
+associated_genes <- Reduce(intersect, lapply(filtered_data, function(x) x$associated_gene))
+
+# Function to filter and summarize data without expanding rows
+filter_and_summarize_dataframe <- function(file, associated_genes) {
+  df <- read.table(file, header = TRUE, stringsAsFactors = FALSE)
+  
+  # Filter out artifacts and keep only associated genes
+  df <- df[df$filter_result != "Artifact", ]
+  df <- df[df$associated_gene %in% associated_genes, ]
+  
+  # Add sample information
+  df$sample <- sub("_.*", "", basename(file))
+  
+  # Calculate the number of reads and lengths
+  df_summarized <- df %>%
+    group_by(sample) %>%
+    summarize(read_lengths = list(rep(length, FL))) %>%
+    unnest(cols = c(read_lengths)) %>%  # Flatten the list into a column
+    ungroup()
+  
+  return(df_summarized)
+}
+
+# List of files to process
+files <- list.files(path = "/home/carblan/Documents/R_files/TFM/filtered_classifications", pattern = "B", full.names = TRUE)
+
+# Apply the filter and summarization function to each file
+filtered_dfs <- lapply(files, filter_and_summarize_dataframe, associated_genes)
+
+# Combine all dataframes into one
+combined_df <- bind_rows(filtered_dfs)
+
+# Define sample groups and pools
+combined_df$group <- ifelse(combined_df$sample %in% c("B151", "B152", "B153", "B154"), "old", "young")
+combined_df$pool <- ifelse(combined_df$sample %in% c("B31", "B32", "B33", "B151", "B152"), "pool 1", "pool 2")
+
+# Set the order of samples for plotting
+samples_order <- c("B31", "B32", "B33", "B151", "B152", "B34", "B35", "B153", "B154")
+combined_df$sample <- factor(combined_df$sample, levels = samples_order)
+combined_df$group <- factor(combined_df$group, levels = c("young", "old"))
+
+# Create the plot
+p <- ggplot(combined_df, aes(x = sample, y = read_lengths, fill = group, color = group)) +
+  geom_violin(alpha = 0.3) +
+  geom_boxplot(alpha = 0.5, width = 0.5, outlier.shape = NA) +
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main") +
+  labs(x = "Sample", y = "Read length") +
+  theme_minimal() +
+  my_theme
+
+# Save the plot
+ggsave("pacbio_filtered_read_length_distribution.png", p, path = "/home/carblan/Documents/R_files/TFM/figures/Length_bias", width = 10, height = 7)
+
+combined_df$group <- factor(combined_df$group, levels = c("young", "old"))
+combined_df$pool <- factor(combined_df$pool, levels = c("pool 1", "pool 2"))
+
+res.aov2 <- aov(read_lengths ~ group * pool, data = combined_df)
+anova_results <- Anova(res.aov2, type = "III")
+print(Anova(res.aov2, type = "III"))
+
+p <- ggplot(combined_df, aes(x = pool, y = read_lengths, fill = pool, color = pool)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Pool", y = "Read length", fill = "Pool", color = "Pool") +
+  scale_fill_conesa(palette = "warm") +
+  scale_color_conesa(palette = "warm") +
+  theme_minimal() +
+  my_theme
+ggsave("pacbio_filtered_read_length_distribution_pools.png", p, path = "/home/carblan/Documents/R_files/TFM/figures/Length_bias", width = 10, height = 7)
+
+p <- ggplot(combined_df, aes(x = group, y = read_lengths, fill = group, color = group)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Age group", y = "Read length", fill = "Age group", color = "Age group") +
+  theme_minimal() +
+  my_theme +
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main")
+
+ggsave("pacbio_filtered_read_length_distribution_age.png", p, path = "/home/carblan/Documents/R_files/TFM/figures/Length_bias")
+
+agg_df <- combined_df %>%
+  group_by(group, pool) %>%
+  summarize(avg_length = mean(read_lengths), .groups = 'drop')
+
+# Create interaction plot with average percentages
+p <- ggplot(agg_df, aes(x = pool, y = avg_length, color = group, group = group)) +
+  geom_point(size = 3) +
+  geom_line(size = 1) +
+  labs(
+    x = "Pool",
+    y = "Mean read length",
+    color = "Age group",
+    linetype = "Age group"
+  ) +
+  scale_color_conesa(palette= "main") +
+  theme_minimal() +
+  my_theme
+
+ggsave("pacbio_filtered_read_length_distribution_interaction_plot.png", p, path = "/home/carblan/Documents/R_files/TFM/figures/RBNcapture/PacBio")
+
+```
+
+
+# Structural categories/all length distribution (genes weighted lengths):
+
+```{r}
+files <- list.files(path = "/home/carblan/Documents/R_files/TFM/filtered_per_gene_classifications",
+                	full.names = TRUE)
+
+filtered_data <- list()
+
+for (file in files) {
+  data <- read.table(file, header=TRUE, stringsAsFactors=FALSE)
+
+  data <- data[data$full_splice_match_counts >= 10,]
+
+  filtered_data[[file]] <- data
+}
+
+associated_genes <- Reduce(intersect, lapply(filtered_data, function(x) x$associated_gene))
+
+filter_dataframe <- function(file, associated_genes) {
+  df <- read.table(file, header = TRUE)
+  df <- df[df$filter_result != "Artifact", ]
+  df <- df[df$associated_gene %in% associated_genes, ]
+  df$sample <- sub("_.*", "", basename(file))
+  df <- df %>%
+    group_by(sample, associated_gene) %>%
+    summarise(weighted_length = sum(length * FL) / sum(FL), .groups = 'drop')
+  return(df)
+}
+
+files <- list.files(path = "/home/carblan/Documents/R_files/TFM/filtered_classifications", pattern = "B", full.names = TRUE)
+filtered_dfs <- lapply(files, filter_dataframe, associated_genes)
+
+combined_df <- bind_rows(filtered_dfs)
+combined_df$group <- ifelse(combined_df$sample %in% c("B151", "B152", "B153", "B154"), "old", "young")
+combined_df$pool <- ifelse(combined_df$sample %in% c("B31", "B32", "B33", "B151", "B152"), "pool 1", "pool 2")
+samples_order <- c("B31", "B32", "B33", "B151", "B152", "B34", "B35", "B153", "B154")
+combined_df$sample <- factor(combined_df$sample, levels = samples_order)
+
+
+ggplot(combined_df, aes(x = sample, y = weighted_length, fill = group, color = group)) +
+  geom_violin(alpha = 0.3) +
+  geom_boxplot(alpha = 0.5, width = 0.5, outlier.shape = NA) + 
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main") +
+  labs(x = "Sample", y = "Gene weighted_length", title = "Weighted length for genes in the intersection between pools") +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 17),
+    axis.text.y = element_text(size = 17),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    plot.title = element_text(size = 25, hjust = 0.5),
+    legend.title = element_text(size = 17),
+    legend.text = element_text(size = 15))
+```
+
+
+# Top 10% genes with higher noisy reads ratio difference in pool 1 vs. pool 2 transcript models length distribution (vs. the rest)
+
+## Young mice
+
+```{r}
+files <- list.files(path = "/home/carblan/Documents/R_files/TFM/filtered_per_gene_classifications",
+                	full.names = TRUE)
+
+filtered_data <- list()
+
+for (file in files) {
+  data <- read.table(file, header=TRUE, stringsAsFactors=FALSE)
+
+  data <- data[data$full_splice_match_counts >= 10,]
+
+  filtered_data[[file]] <- data
+}
+
+associated_genes <- Reduce(intersect, lapply(filtered_data, function(x) x$associated_gene))
+
+filter_dataframe <- function(file, associated_genes) {
+  df <- read.table(file, header = TRUE)
+  df <- df[df$filter_result != "Artifact", ]
+  df <- df[df$associated_gene %in% associated_genes, ]
+  df$sample <- sub("_.*", "", basename(file))
+  return(df)
+}
+
+files <- list.files(path = "/home/carblan/Documents/R_files/TFM/filtered_classifications", pattern = "B3", full.names = TRUE)
+filtered_dfs <- lapply(files, filter_dataframe, associated_genes)
+
+combined_df <- bind_rows(filtered_dfs)
+combined_df$pool <- ifelse(combined_df$sample %in% c("B31", "B32", "B33"), "pool 1", "pool 2")
+combined_df$sample <- factor(combined_df$sample, levels = samples_order)
+
+top_10_percent_genes <- noisy_reads_ratio_difference_young %>%
+  arrange(desc(noisy_reads_ratio_diff)) %>%
+  head(ceiling(0.1 * nrow(noisy_reads_ratio_difference_young))) %>%
+  pull(associated_gene)
+
+# Dividir el dataframe en dos grupos de pools
+combined_df_pool1 <- combined_df %>% filter(sample %in% c("B31", "B32", "B33"))
+combined_df_pool2 <- combined_df %>% filter(sample %in% c("B34", "B35"))
+
+# Calcular la longitud ponderada para cada gene en cada pool
+weighted_length_df_pool1 <- combined_df_pool1 %>%
+  group_by(associated_gene) %>%
+  summarise(weighted_length = sum(length * FL) / sum(FL))
+
+weighted_length_df_pool2 <- combined_df_pool2 %>%
+  group_by(associated_gene) %>%
+  summarise(weighted_length = sum(length * FL) / sum(FL))
+
+# Añadir la información sobre si el gen está en el top 10%
+weighted_length_df_pool1 <- weighted_length_df_pool1 %>%
+  mutate(group = ifelse(associated_gene %in% top_10_percent_genes, "Top 10%", "Rest"))
+
+weighted_length_df_pool2 <- weighted_length_df_pool2 %>%
+  mutate(group = ifelse(associated_gene %in% top_10_percent_genes, "Top 10%", "Rest"))
+
+# Añadir la información del pool
+weighted_length_df_pool1 <- weighted_length_df_pool1 %>%
+  mutate(pool = "Pool 1")
+
+weighted_length_df_pool2 <- weighted_length_df_pool2 %>%
+  mutate(pool = "Pool 2")
+
+# Combinar los dataframes
+weighted_length_df <- bind_rows(weighted_length_df_pool1, weighted_length_df_pool2)
+
+# Graficar los cuatro grupos
+ggplot(weighted_length_df, aes(x = interaction(group, pool), y = weighted_length, fill = group, color = group)) +
+  geom_violin(alpha = 0.3) +
+  geom_boxplot(alpha = 0.5, width = 0.5, outlier.shape = NA) +
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main") +
+  labs(x = "Group and Pool", y = "Gene Weighted Length", title = paste("Weighted Length Distribution of Genes (young mice):\n", "Top 10% Noisier Genes vs. Rest by Pool")) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 17),
+    axis.text.y = element_text(size = 17),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    plot.title = element_text(size = 25, hjust = 0.5),
+    legend.title = element_text(size = 17),
+    legend.text = element_text(size = 15)
+  )
+```
+
+
+## Old mice
+
+```{r}
+files <- list.files(path = "/home/carblan/Documents/R_files/TFM/filtered_per_gene_classifications",
+                	full.names = TRUE)
+
+filtered_data <- list()
+
+for (file in files) {
+  data <- read.table(file, header=TRUE, stringsAsFactors=FALSE)
+
+  data <- data[data$full_splice_match_counts >= 10,]
+
+  filtered_data[[file]] <- data
+}
+
+associated_genes <- Reduce(intersect, lapply(filtered_data, function(x) x$associated_gene))
+
+filter_dataframe <- function(file, associated_genes) {
+  df <- read.table(file, header = TRUE)
+  df <- df[df$filter_result != "Artifact", ]
+  df <- df[df$associated_gene %in% associated_genes, ]
+  df$sample <- sub("_.*", "", basename(file))
+  return(df)
+}
+
+files <- list.files(path = "/home/carblan/Documents/R_files/TFM/filtered_classifications", pattern = "B15", full.names = TRUE)
+filtered_dfs <- lapply(files, filter_dataframe, associated_genes)
+
+combined_df <- bind_rows(filtered_dfs)
+combined_df$pool <- ifelse(combined_df$sample %in% c("B151", "B152"), "pool 1", "pool 2")
+
+top_10_percent_genes <- noisy_reads_ratio_difference_old %>%
+  arrange(desc(noisy_reads_ratio_diff)) %>%
+  head(ceiling(0.1 * nrow(noisy_reads_ratio_difference_old))) %>%
+  pull(associated_gene)
+
+
+combined_df_pool1 <- combined_df %>% filter(sample %in% c("B151", "B152"))
+combined_df_pool2 <- combined_df %>% filter(sample %in% c("B153", "B154"))
+
+
+weighted_length_df_pool1 <- combined_df_pool1 %>%
+  group_by(associated_gene) %>%
+  summarise(weighted_length = sum(length * FL) / sum(FL))
+
+weighted_length_df_pool2 <- combined_df_pool2 %>%
+  group_by(associated_gene) %>%
+  summarise(weighted_length = sum(length * FL) / sum(FL))
+
+
+weighted_length_df_pool1 <- weighted_length_df_pool1 %>%
+  mutate(group = ifelse(associated_gene %in% top_10_percent_genes, "Top 10%", "Rest"))
+
+weighted_length_df_pool2 <- weighted_length_df_pool2 %>%
+  mutate(group = ifelse(associated_gene %in% top_10_percent_genes, "Top 10%", "Rest"))
+
+
+weighted_length_df_pool1 <- weighted_length_df_pool1 %>%
+  mutate(pool = "Pool 1")
+
+weighted_length_df_pool2 <- weighted_length_df_pool2 %>%
+  mutate(pool = "Pool 2")
+
+
+weighted_length_df <- bind_rows(weighted_length_df_pool1, weighted_length_df_pool2)
+
+
+ggplot(weighted_length_df, aes(x = interaction(group, pool), y = weighted_length, fill = group, color = group)) +
+  geom_violin(alpha = 0.3) +
+  geom_boxplot(alpha = 0.5, width = 0.5, outlier.shape = NA) +
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main") +
+  labs(x = "Group and Pool", y = "Gene Weighted Length", title = paste("Weighted Length Distribution of Genes (old mice):\n", "Top 10% Noisier Genes vs. Rest by Pool")) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 17),
+    axis.text.y = element_text(size = 17),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    plot.title = element_text(size = 25, hjust = 0.5),
+    legend.title = element_text(size = 17),
+    legend.text = element_text(size = 15)
+  )
+```
+
+## Per sample length distribution (top 10% genes)
+
+```{r}
+files <- list.files(path = "/home/carblan/Documents/R_files/TFM/filtered_per_gene_classifications",
+                	full.names = TRUE)
+filtered_data <- list()
+
+for (file in files) {
+  data <- read.table(file, header=TRUE, stringsAsFactors=FALSE)
+
+  data <- data[data$full_splice_match_counts >= 10,]
+
+  filtered_data[[file]] <- data
+}
+
+associated_genes <- Reduce(intersect, lapply(filtered_data, function(x) x$associated_gene))
+
+filter_dataframe <- function(file, associated_genes) {
+  df <- read.table(file, header = TRUE)
+  df <- df[df$filter_result != "Artifact", ]
+  df <- df[df$associated_gene %in% associated_genes, ]
+  df$sample <- sub("_.*", "", basename(file))
+  return(df)
+}
+
+files <- list.files(path = "/home/carblan/Documents/R_files/TFM/filtered_classifications", pattern = "B", full.names = TRUE)
+filtered_dfs <- lapply(files, filter_dataframe, associated_genes)
+
+noise_diff_df <- read.table("/home/carblan/Documents/R_files/TFM/FSM>=10_intersection_filtered_genes/per_gene_noisy_reads_ratio/noisy_reads_ratio_difference_per_gene.txt", header = TRUE)
+top_10_percent_threshold <- quantile(noise_diff_df$noisy_reads_ratio_diff, 0.9)
+noise_diff_df <- noise_diff_df %>%
+  mutate(top_10_percent = ifelse(noisy_reads_ratio_diff >= top_10_percent_threshold, "Top 10%", "Rest"))
+top_10_percent_genes <- noise_diff_df %>%
+  filter(top_10_percent == "Top 10%") %>%
+  select(associated_gene)
+
+calculate_weighted_length <- function(df, top_10_genes) {
+  df <- df %>%
+    filter(associated_gene %in% top_10_genes$associated_gene) %>%
+    group_by(associated_gene, sample) %>%
+    summarise(weighted_length = sum(length * FL) / sum(FL)) %>%
+    ungroup()
+  return(df)
+}
+
+weighted_length_list <- lapply(filtered_dfs, calculate_weighted_length, top_10_genes = top_10_percent_genes)
+
+combined_df <- bind_rows(weighted_length_list)
+combined_df$pool <- ifelse(combined_df$sample %in% c("B31", "B32", "B33", "B151", "B152"), "pool 1", "pool 2")
+combined_df$age_group <- ifelse(combined_df$sample %in% c("B31", "B32", "B33", "B34", "B35"), "young", "old")
+samples_order <- c("B31", "B32", "B33", "B151", "B152", "B34", "B35", "B153", "B154")
+combined_df$sample <- factor(combined_df$sample, levels = samples_order)
+
+medians <- combined_df %>%
+  filter(sample %in% c("B31", "B32", "B33")) %>%
+  group_by(sample) %>%
+  summarize(median_weighted_length = median(weighted_length, na.rm = TRUE))
+mean_of_medians <- mean(medians$median_weighted_length, na.rm = TRUE)
+mean_median_line <- data.frame(yintercept = mean_of_medians, label = "Mean of medians B31-B33")
+
+
+ggplot(combined_df, aes(x = sample, y = weighted_length, fill = age_group, color = age_group)) +
+  geom_violin(alpha = 0.3) +
+  geom_boxplot(alpha = 0.5, width = 0.5, outlier.shape = NA) + 
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main") +
+  labs(x = "Sample", y = "Gene weighted length", title = paste("Per gene weighted length distribution")) +
+  geom_hline(aes(yintercept = mean_of_medians, linetype = "B31-B33 Median Average"), color = "red", size = 1) +
+  scale_linetype_manual(name = "", values = c("B31-B33 Average" = "dashed")) +
+  guides(linetype = guide_legend(override.aes = list(color = "red"))) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 17),
+    axis.text.y = element_text(size = 17),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    plot.title = element_text(size = 25, hjust = 0.5),
+    legend.title = element_text(size = 17),
+    legend.text = element_text(size = 15))
+
+```
+
+
+
+
+
+
+
+

@@ -1,0 +1,1452 @@
+
+
+# NANOPORE REPRESENTATION OF CATEGORIES
+
+## Structural categories percentages (before filtering with SQANTI3 filter)
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(RColorConesa)
+library(tidyr)  
+library(ggpubr)
+
+
+process_classification_file <- function(file) {
+  sample_name <- sub("_.*", "", basename(file))
+  df <- read.table(file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+  df$sample <- sample_name
+  return(df)
+}
+
+# List all classification.txt files and GTF files
+classification_files <- list.files("/home/carblan/Documents/R_files/TFM/filtered_classifications_nanopore_not_subsampled", pattern = "B", full.names = TRUE)
+
+# Read and combine all classification files
+classification_dfs <- lapply(classification_files, process_classification_file)
+combined_classification_df <- do.call(rbind, classification_dfs)
+
+# Rename categories to match the color palette keys
+combined_classification_df$structural_category <- dplyr::recode(combined_classification_df$structural_category,
+                                                         "full-splice_match" = "FSM",
+                                                         "incomplete-splice_match" = "ISM",
+                                                         "novel_in_catalog" = "NIC",
+                                                         "novel_not_in_catalog" = "NNC",
+                                                         "genic" = "Genic Genomic",
+                                                         "antisense" = "Antisense",
+                                                         "fusion" = "Fusion",
+                                                         "intergenic" = "Intergenic",
+                                                         "genic_intron" = "Genic Intron")
+
+combined_classification_df <- combined_classification_df %>%
+  mutate(group_age = case_when(
+    sample %in% c("B31", "B32", "B33", "B34", "B35") ~ "young",
+    sample %in% c("B151", "B152", "B153", "B154") ~ "old"
+  ))
+
+# Create the bar plot for transcript models percentages
+plot_classification_data <- function(class_combined_df, sample_labels) {
+  p <- ggplot(class_combined_df, aes(x = sample, fill = structural_category)) +
+    geom_bar(position = "fill") +
+    scale_fill_conesa(palette = "complete", na.value = "grey", name = "Structural Category") +
+    scale_x_discrete(labels = sample_labels) +
+    theme_minimal() +
+    theme(legend.position = "right", axis.title.x = element_blank()) +
+    labs(x = "Sample",
+         y = "% of transcript models") +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 17),
+      axis.text.y = element_text(size = 17),
+      axis.title.x = element_text(size = 20),
+      axis.title.y = element_text(size = 20),
+      legend.title = element_text(size = 17),
+      legend.text = element_text(size = 15))
+  return(p)
+}
+
+sample_labels <- unique(combined_classification_df$sample)
+p <- plot_classification_data(combined_classification_df, sample_labels)
+
+ggsave("nanopore_qc_isoforms%_barplots.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+percentage_df <- combined_classification_df %>%
+  group_by(sample, structural_category, group_age) %>%
+  summarise(count = n()) %>%
+  group_by(sample) %>%
+  mutate(total = sum(count),
+         percentage = (count / total) * 100) %>%
+  ungroup()
+
+percentage_df$group_age <- factor(percentage_df$group_age, levels = c("young", "old"))
+
+categories_df <- split(percentage_df, percentage_df$structural_category)
+
+combined_df <- bind_rows(categories_df)
+p <- ggplot(combined_df, aes(x = group_age, y = percentage, fill = group_age, color = group_age)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Age group", y = "% of transcript models", fill = "Age group", color = "Age group") +
+  theme_minimal() +
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main") +
+  facet_wrap(~ structural_category, scales = "free_y") +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"), 
+  ) +
+  stat_compare_means( aes(label = ..p.signif..), 
+                        label.x = 1.5, hide.ns = TRUE, method = "t.test") +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.2)))
+
+ggsave("nanopore_qc_isoforms%_boxplots_age_group.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+
+## PARA LA VERSION CON READS
+# Calcular los totales ponderados por muestra y categoría estructural
+weighted_df <- combined_classification_df %>%
+  group_by(sample, structural_category) %>%
+  summarise(total_FL = sum(FL, na.rm = TRUE)) %>%
+  ungroup()
+
+# Calcular el total de FL por muestra para normalizar
+total_FL_per_sample <- weighted_df %>%
+  group_by(sample) %>%
+  summarise(total_sample_FL = sum(total_FL))
+
+# Unir los dataframes para obtener el porcentaje ponderado
+weighted_df <- weighted_df %>%
+  left_join(total_FL_per_sample, by = "sample") %>%
+  mutate(weighted_percentage = total_FL / total_sample_FL)
+
+# Modificar la función para utilizar los porcentajes ponderados
+plot_weighted_classification_data <- function(weighted_df, sample_labels) {
+  p_weighted <- ggplot(weighted_df, aes(x = sample, y = weighted_percentage, fill = structural_category)) +
+    geom_bar(stat = "identity", position = "fill") +
+    scale_fill_conesa(palette = "complete", na.value = "grey", name = "Structural Category") +
+    scale_x_discrete(labels = sample_labels) +
+    theme_minimal() +
+    theme(legend.position = "right", axis.title.x = element_blank()) +
+    labs(x = "Sample",
+         y = "% of reads") +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 17),
+      axis.text.y = element_text(size = 17),
+      axis.title.x = element_text(size = 20),
+      axis.title.y = element_text(size = 20),
+      plot.title = element_text(size = 25, hjust = 0.5),
+      legend.title = element_text(size = 17),
+      legend.text = element_text(size = 15))
+  return(p_weighted)
+}
+
+# Generar el gráfico ponderado
+p_weighted <- plot_weighted_classification_data(weighted_df, sample_labels)
+
+# Mostrar o guardar el gráfico
+ggsave("nanopore_qc_reads%_barplots.png", p_weighted, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+weighted_df <- combined_classification_df %>%
+  group_by(sample, structural_category, group_age) %>%
+  summarise(total_FL = sum(FL, na.rm = TRUE)) %>%
+  group_by(sample) %>%
+  mutate(total_FL_sample = sum(total_FL),
+         percentage = (total_FL / total_FL_sample) * 100) %>%
+  ungroup()
+
+weighted_df$group_age <- factor(weighted_df$group_age, levels = c("young", "old"))
+
+categories_df <- split(weighted_df, weighted_df$structural_category)
+
+combined_df <- bind_rows(categories_df)
+p <- ggplot(combined_df, aes(x = group_age, y = percentage, fill = group_age, color = group_age)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Age group", y = "% of reads", fill = "Age group", color = "Age group") +
+  theme_minimal() +
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main") +
+  facet_wrap(~ structural_category, scales = "free_y") +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines")
+  ) +
+  stat_compare_means( aes(label = ..p.signif..), 
+                        label.x = 1.5, hide.ns = TRUE, method = "t.test") +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.2)))
+
+ggsave("nanopore_qc_reads%_boxplots_age_group.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+```
+
+
+
+## Structural categories percentages (after filtering with SQANTI3 filter)
+
+```{r}
+process_classification_file <- function(file) {
+  sample_name <- sub("_.*", "", basename(file))
+  df <- read.table(file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+  if ("filter_result" %in% colnames(df)) {
+    df <- df %>% filter(filter_result == "Isoform")
+  }
+  df$sample <- sample_name
+  return(df)
+}
+
+classification_files <- list.files("/home/carblan/Documents/R_files/TFM/filtered_classifications_nanopore_not_subsampled", pattern = "B", full.names = TRUE)
+
+# Read and combine all classification files
+classification_dfs <- lapply(classification_files, process_classification_file)
+combined_classification_df <- do.call(rbind, classification_dfs)
+
+# Rename categories to match the color palette keys
+combined_classification_df$structural_category <- dplyr::recode(combined_classification_df$structural_category,
+                                                         "full-splice_match" = "FSM",
+                                                         "incomplete-splice_match" = "ISM",
+                                                         "novel_in_catalog" = "NIC",
+                                                         "novel_not_in_catalog" = "NNC",
+                                                         "genic" = "Genic\nGenomic",
+                                                         "antisense" = "Antisense",
+                                                         "fusion" = "Fusion",
+                                                         "intergenic" = "Intergenic",
+                                                         "genic_intron" = "Genic\nIntron")
+
+combined_classification_df <- combined_classification_df %>%
+  mutate(group_age = case_when(
+    sample %in% c("B31", "B32", "B33", "B34", "B35") ~ "young",
+    sample %in% c("B151", "B152", "B153", "B154") ~ "old"
+  ))
+
+plot_classification_data <- function(class_combined_df, sample_labels) {
+  p <- ggplot(class_combined_df, aes(x = sample, fill = structural_category)) +
+    geom_bar(position = "fill") +
+    scale_fill_conesa(palette = "complete", na.value = "grey", name = "Structural Category") +
+    scale_x_discrete(labels = sample_labels) +
+    theme_minimal() +
+    theme(legend.position = "right", axis.title.x = element_blank()) +
+    labs(x = "Sample",
+         y = "% of transcript models") +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 17),
+      axis.text.y = element_text(size = 17),
+      axis.title.x = element_text(size = 20),
+      axis.title.y = element_text(size = 20),
+      legend.title = element_text(size = 17),
+      legend.text = element_text(size = 15))
+  return(p)
+}
+
+sample_labels <- unique(combined_classification_df$sample)
+p <- plot_classification_data(combined_classification_df, sample_labels)
+
+ggsave("nanopore_filter_isoforms%_barplots.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+percentage_df <- combined_classification_df %>%
+  group_by(sample, structural_category, group_age) %>%
+  summarise(count = n()) %>%
+  group_by(sample) %>%
+  mutate(total = sum(count),
+         percentage = (count / total) * 100) %>%
+  ungroup()
+
+percentage_df$group_age <- factor(percentage_df$group_age, levels = c("young", "old"))
+
+categories_df <- split(percentage_df, percentage_df$structural_category)
+
+combined_df <- bind_rows(categories_df)
+p <- ggplot(combined_df, aes(x = group_age, y = percentage, fill = group_age, color = group_age)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Age group", y = "% of transcript models", fill = "Age group", color = "Age group") +
+  theme_minimal() +
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main") +
+  facet_wrap(~ structural_category, scales = "free_y") +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines") 
+  ) +
+
+  stat_compare_means( aes(label = ..p.signif..), 
+                        label.x = 1.5, hide.ns = TRUE, method = "t.test") +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.2)))
+
+ggsave("nanopore_filter_isoforms%_boxplots_age_group.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+
+## PARA LA VERSION CON READS
+weighted_df <- combined_classification_df %>%
+  group_by(sample, structural_category) %>%
+  summarise(total_FL = sum(FL, na.rm = TRUE)) %>%
+  ungroup()
+
+total_FL_per_sample <- weighted_df %>%
+  group_by(sample) %>%
+  summarise(total_sample_FL = sum(total_FL))
+
+weighted_df <- weighted_df %>%
+  left_join(total_FL_per_sample, by = "sample") %>%
+  mutate(weighted_percentage = total_FL / total_sample_FL)
+
+plot_weighted_classification_data <- function(weighted_df, sample_labels) {
+  p_weighted <- ggplot(weighted_df, aes(x = sample, y = weighted_percentage, fill = structural_category)) +
+    geom_bar(stat = "identity", position = "fill") +
+    scale_fill_conesa(palette = "complete", na.value = "grey", name = "Structural Category") +
+    scale_x_discrete(labels = sample_labels) +
+    theme_minimal() +
+    theme(legend.position = "right", axis.title.x = element_blank()) +
+    labs(x = "Sample",
+         y = "% of reads") +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 17),
+      axis.text.y = element_text(size = 17),
+      axis.title.x = element_text(size = 20),
+      axis.title.y = element_text(size = 20),
+      plot.title = element_text(size = 25, hjust = 0.5),
+      legend.title = element_text(size = 17),
+      legend.text = element_text(size = 15))
+  return(p_weighted)
+}
+
+p_weighted <- plot_weighted_classification_data(weighted_df, sample_labels)
+
+ggsave("nanopore_filter_reads%_barplots.png", p_weighted, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+weighted_df <- combined_classification_df %>%
+  group_by(sample, structural_category, group_age) %>%
+  summarise(total_FL = sum(FL, na.rm = TRUE)) %>%
+  group_by(sample) %>%
+  mutate(total_FL_sample = sum(total_FL),
+         percentage = (total_FL / total_FL_sample) * 100) %>%
+  ungroup()
+
+weighted_df$group_age <- factor(weighted_df$group_age, levels = c("young", "old"))
+
+categories_df <- split(weighted_df, weighted_df$structural_category)
+
+combined_df <- bind_rows(categories_df)
+p <- ggplot(combined_df, aes(x = group_age, y = percentage, fill = group_age, color = group_age)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Age group", y = "% of reads", fill = "Age group", color = "Age group") +
+  theme_minimal() +
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main") +
+  facet_wrap(~ structural_category, scales = "free_y") +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines") 
+  ) +
+  stat_compare_means( aes(label = ..p.signif..), 
+                        label.x = 1.5, hide.ns = TRUE, method = "t.test") +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.2)))
+
+ggsave("nanopore_filter_reads%_boxplots_age_group.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+```
+
+##  Structural categories percentages (automatic rescue)
+
+```{r}
+process_classification_file <- function(file) {
+  sample_name <- sub("_.*", "", basename(file))
+  df <- read.table(file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+  if ("filter_result" %in% colnames(df)) {
+    df <- df %>% filter(filter_result == "Isoform")
+  }
+  df$sample <- sample_name
+  return(df)
+}
+
+process_gtf_file <- function(file) {
+  gtf_data <- read.table(file, header = FALSE, sep = "\t", stringsAsFactors = FALSE)
+  colnames(gtf_data) <- c("chr", "source", "feature", "start", "end", "score", "strand", "frame", "attribute")
+  
+  gtf_data$transcript_id <- str_match(gtf_data$attribute, 'transcript_id ([^;]+);')[,2]  
+  additional_transcripts <- unique(gtf_data$transcript_id[!grepl("^G\\d+\\.\\d+$", gtf_data$transcript_id)])
+  return(additional_transcripts)
+}
+
+classification_files <- list.files("/home/carblan/Documents/R_files/TFM/filtered_classifications_nanopore_not_subsampled", pattern = "B", full.names = TRUE)
+gtf_files <- list.files("/home/carblan/Documents/R_files/TFM/automatic_rescued_gtfs_nanopore/not_subsampled/", pattern = "B", full.names = TRUE)
+
+classification_dfs <- lapply(classification_files, process_classification_file)
+combined_classification_df <- do.call(rbind, classification_dfs)
+
+for (gtf_file in gtf_files) {
+  sample_name <- sub("_.*", "", basename(gtf_file))
+  additional_transcripts <- process_gtf_file(gtf_file)
+  
+  additional_df <- data.frame(
+    isoform = additional_transcripts,
+    structural_category = "FSM",
+    sample = sample_name,
+    stringsAsFactors = FALSE
+  )
+  
+  additional_df <- additional_df %>% 
+    mutate(across(everything(), as.character)) %>%
+    mutate(across(everything(), ~ replace_na(.x, NA))) %>%
+    bind_rows(combined_classification_df[1,]) %>% 
+    select(colnames(combined_classification_df)) %>% 
+    slice(1:(n() - 1))
+  
+  combined_classification_df <- rbind(combined_classification_df, additional_df)
+}
+
+combined_classification_df$structural_category <- dplyr::recode(combined_classification_df$structural_category,
+                                                         "full-splice_match" = "FSM",
+                                                         "incomplete-splice_match" = "ISM",
+                                                         "novel_in_catalog" = "NIC",
+                                                         "novel_not_in_catalog" = "NNC",
+                                                         "genic" = "Genic\nGenomic",
+                                                         "antisense" = "Antisense",
+                                                         "fusion" = "Fusion",
+                                                         "intergenic" = "Intergenic",
+                                                         "genic_intron" = "Genic\nIntron")
+
+combined_classification_df <- combined_classification_df %>%
+  mutate(group_age = case_when(
+    sample %in% c("B31", "B32", "B33", "B34", "B35") ~ "young",
+    sample %in% c("B151", "B152", "B153", "B154") ~ "old"
+  ))
+
+plot_classification_data <- function(class_combined_df, sample_labels) {
+  p <- ggplot(class_combined_df, aes(x = sample, fill = structural_category)) +
+    geom_bar(position = "fill") +
+    scale_fill_conesa(palette = "complete", na.value = "grey", name = "Structural Category") +
+    scale_x_discrete(labels = sample_labels) +
+    theme_minimal() +
+    theme(legend.position = "right", axis.title.x = element_blank()) +
+    labs(x = "Sample",
+         y = "% of transcript models") +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 17),
+      axis.text.y = element_text(size = 17),
+      axis.title.x = element_text(size = 20),
+      axis.title.y = element_text(size = 20),
+      legend.title = element_text(size = 17),
+      legend.text = element_text(size = 15))
+  return(p)
+}
+
+sample_labels <- unique(combined_classification_df$sample)
+p <- plot_classification_data(combined_classification_df, sample_labels)
+
+ggsave("nanopore_rescue_isoforms%_barplots.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+percentage_df <- combined_classification_df %>%
+  group_by(sample, structural_category, group_age) %>%
+  summarise(count = n()) %>%
+  group_by(sample) %>%
+  mutate(total = sum(count),
+         percentage = (count / total) * 100) %>%
+  ungroup()
+
+percentage_df$group_age <- factor(percentage_df$group_age, levels = c("young", "old"))
+
+categories_df <- split(percentage_df, percentage_df$structural_category)
+
+combined_df <- bind_rows(categories_df)
+p <- ggplot(combined_df, aes(x = group_age, y = percentage, fill = group_age, color = group_age)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Age group", y = "% of transcript models", fill = "Age group", color = "Age group") +
+  theme_minimal() +
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main") +
+  facet_wrap(~ structural_category, scales = "free_y") +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines") 
+  ) +
+  stat_compare_means( aes(label = ..p.signif..), 
+                        label.x = 1.5, hide.ns = TRUE, method = "t.test") +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.2)))
+
+ggsave("nanopore_rescue_isoforms%_boxplots_age_group.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+
+## PARA LA VERSION CON READS
+weighted_df <- combined_classification_df %>%
+  group_by(sample, structural_category) %>%
+  summarise(total_FL = sum(FL, na.rm = TRUE)) %>%
+  ungroup()
+
+
+total_FL_per_sample <- weighted_df %>%
+  group_by(sample) %>%
+  summarise(total_sample_FL = sum(total_FL))
+
+weighted_df <- weighted_df %>%
+  left_join(total_FL_per_sample, by = "sample") %>%
+  mutate(weighted_percentage = total_FL / total_sample_FL)
+
+plot_weighted_classification_data <- function(weighted_df, sample_labels) {
+  p_weighted <- ggplot(weighted_df, aes(x = sample, y = weighted_percentage, fill = structural_category)) +
+    geom_bar(stat = "identity", position = "fill") +
+    scale_fill_conesa(palette = "complete", na.value = "grey", name = "Structural Category") +
+    scale_x_discrete(labels = sample_labels) +
+    theme_minimal() +
+    theme(legend.position = "right", axis.title.x = element_blank()) +
+    labs(x = "Sample",
+         y = "% of reads") +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 17),
+      axis.text.y = element_text(size = 17),
+      axis.title.x = element_text(size = 20),
+      axis.title.y = element_text(size = 20),
+      plot.title = element_text(size = 25, hjust = 0.5),
+      legend.title = element_text(size = 17),
+      legend.text = element_text(size = 15))
+  return(p_weighted)
+}
+
+p_weighted <- plot_weighted_classification_data(weighted_df, sample_labels)
+
+ggsave("nanopore_rescue_reads%_barplots.png", p_weighted, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+weighted_df <- combined_classification_df %>%
+  group_by(sample, structural_category, group_age) %>%
+  summarise(total_FL = sum(FL, na.rm = TRUE)) %>%
+  group_by(sample) %>%
+  mutate(total_FL_sample = sum(total_FL),
+         percentage = (total_FL / total_FL_sample) * 100) %>%
+  ungroup()
+
+weighted_df$group_age <- factor(weighted_df$group_age, levels = c("young", "old"))
+
+categories_df <- split(weighted_df, weighted_df$structural_category)
+
+combined_df <- bind_rows(categories_df)
+p <- ggplot(combined_df, aes(x = group_age, y = percentage, fill = group_age, color = group_age)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Age group", y = "% of reads", fill = "Age group", color = "Age group") +
+  theme_minimal() +
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main") +
+  facet_wrap(~ structural_category, scales = "free_y") +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"),
+    panel.spacing = unit(1, "lines") 
+  ) +
+
+  stat_compare_means( aes(label = ..p.signif..), 
+                        label.x = 1.5, hide.ns = TRUE, method = "t.test") +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.2)))
+
+ggsave("nanopore_rescue_reads%_boxplots_age_group.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+```
+
+# PACBIO REPRESENTATION OF CATEGORIES
+
+
+## Structural categories percentages (before filtering with SQANTI3 filter)
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(RColorConesa)
+library(tidyr)  
+library(car)
+
+process_classification_file <- function(file) {
+  sample_name <- sub("_.*", "", basename(file))
+  df <- read.table(file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+  df$sample <- sample_name
+  return(df)
+}
+
+classification_files <- list.files("/home/carblan/Documents/R_files/TFM/filtered_classifications", pattern = "B", full.names = TRUE)
+
+classification_dfs <- lapply(classification_files, process_classification_file)
+combined_classification_df <- do.call(rbind, classification_dfs)
+
+combined_classification_df$structural_category <- dplyr::recode(combined_classification_df$structural_category,
+                                                         "full-splice_match" = "FSM",
+                                                         "incomplete-splice_match" = "ISM",
+                                                         "novel_in_catalog" = "NIC",
+                                                         "novel_not_in_catalog" = "NNC",
+                                                         "genic" = "Genic Genomic",
+                                                         "antisense" = "Antisense",
+                                                         "fusion" = "Fusion",
+                                                         "intergenic" = "Intergenic",
+                                                         "genic_intron" = "Genic Intron")
+
+combined_classification_df <- combined_classification_df %>%
+  mutate(group_age = case_when(
+    sample %in% c("B31", "B32", "B33", "B34", "B35") ~ "young",
+    sample %in% c("B151", "B152", "B153", "B154") ~ "old"
+  ),
+  pool = case_when(
+    sample %in% c("B31", "B32", "B33", "B151", "B152") ~ "pool 1",
+    sample %in% c("B34", "B35", "B153", "B154") ~ "pool 2"
+  ))
+
+plot_classification_data <- function(class_combined_df, sample_labels) {
+  p <- ggplot(class_combined_df, aes(x = sample, fill = structural_category)) +
+    geom_bar(position = "fill") +
+    scale_fill_conesa(palette = "complete", na.value = "grey", name = "Structural Category") +
+    scale_x_discrete(labels = sample_labels) +
+    theme_minimal() +
+    theme(legend.position = "right", axis.title.x = element_blank()) +
+    labs(x = "Sample",
+         y = "% of transcript models") +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 17),
+      axis.text.y = element_text(size = 17),
+      axis.title.x = element_text(size = 20),
+      axis.title.y = element_text(size = 20),
+      legend.title = element_text(size = 17),
+      legend.text = element_text(size = 15))
+  return(p)
+}
+
+sample_labels <- unique(combined_classification_df$sample)
+p <- plot_classification_data(combined_classification_df, sample_labels)
+
+ggsave("pacbio_qc_isoforms%_barplots.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+
+
+percentage_df <- combined_classification_df %>%
+  group_by(sample, structural_category, group_age, pool) %>%
+  summarise(count = n()) %>%
+  group_by(sample) %>%
+  mutate(total = sum(count),
+         percentage = (count / total) * 100) %>%
+  ungroup()
+
+percentage_df$group_age <- factor(percentage_df$group_age, levels = c("young", "old"))
+percentage_df$pool <- factor(percentage_df$pool, levels = c("pool 1", "pool 2"))
+
+
+categories_df <- split(percentage_df, percentage_df$structural_category)
+
+structural_categories <- unique(percentage_df$structural_category)
+
+anova_results <- list()
+for (structural_category in structural_categories) {
+  res.aov2 <- aov(percentage ~ group_age * pool, data = categories_df[[structural_category]])
+  anova_results[[structural_category]] <- Anova(res.aov2, type = "III")
+  print(Anova(res.aov2, type = "III"))
+}
+
+
+extract_anova_results <- function(anova_results, number) {
+  lapply(names(anova_results), function(category) {
+    p_value <- anova_results[[category]]$`Pr(>F)`[number]
+    data.frame(category = category, p_value = as.numeric(p_value))
+  }) %>% bind_rows()
+}
+
+anova_results_df_age <- extract_anova_results(anova_results, 2)
+
+combined_df <- bind_rows(categories_df)
+p <- ggplot(combined_df, aes(x = group_age, y = percentage, fill = group_age, color = group_age)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Age group", y = "% of transcript models", fill = "Age group", color = "Age group") +
+  theme_minimal() +
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main") +
+  facet_wrap(~ structural_category, scales = "free_y") +
+  theme(
+    strip.text = element_text(size = 10),
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines") 
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.5)))
+
+ggsave("pacbio_qc_isoforms%_boxplots_age_group.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+
+p <- ggplot(combined_df, aes(x = pool, y = percentage, fill = pool, color = pool)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Pool", y = "% of transcript models", fill = "Pool", color = "Pool") +
+  theme_minimal() +
+  scale_fill_conesa(palette = "warm") +
+  scale_color_conesa(palette = "warm") +
+  facet_wrap(~ structural_category, scales = "free_y") +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines") 
+  ) +
+
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.5)))
+
+ggsave("pacbio_qc_isoforms%_boxplots_pool.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+agg_df <- combined_df %>%
+  group_by(structural_category, group_age, pool) %>%
+  summarize(avg_percentage = mean(percentage), .groups = 'drop')
+
+p <- ggplot(agg_df, aes(x = pool, y = avg_percentage, color = group_age, group = group_age)) +
+  geom_point(size = 3) +
+  geom_line(size = 1) +
+  facet_wrap(~ structural_category,scales = "free_y") +
+  labs(
+    x = "Pool",
+    y = "Mean % of transcript models",
+    color = "Age group",
+    linetype = "Age group"
+  ) +
+  scale_color_conesa(palette= "main") +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines") 
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.5)))
+
+ggsave("pacbio_qc_isoforms%_interaction_plot.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+
+## PARA LA VERSION CON READS
+weighted_df <- combined_classification_df %>%
+  group_by(sample, structural_category) %>%
+  summarise(total_FL = sum(FL, na.rm = TRUE)) %>%
+  ungroup()
+
+total_FL_per_sample <- weighted_df %>%
+  group_by(sample) %>%
+  summarise(total_sample_FL = sum(total_FL))
+
+weighted_df <- weighted_df %>%
+  left_join(total_FL_per_sample, by = "sample") %>%
+  mutate(weighted_percentage = total_FL / total_sample_FL)
+
+plot_weighted_classification_data <- function(weighted_df, sample_labels) {
+  p_weighted <- ggplot(weighted_df, aes(x = sample, y = weighted_percentage, fill = structural_category)) +
+    geom_bar(stat = "identity", position = "fill") +
+    scale_fill_conesa(palette = "complete", na.value = "grey", name = "Structural Category") +
+    scale_x_discrete(labels = sample_labels) +
+    theme_minimal() +
+    theme(legend.position = "right", axis.title.x = element_blank()) +
+    labs(x = "Sample",
+         y = "% of reads") +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 17),
+      axis.text.y = element_text(size = 17),
+      axis.title.x = element_text(size = 20),
+      axis.title.y = element_text(size = 20),
+      plot.title = element_text(size = 25, hjust = 0.5),
+      legend.title = element_text(size = 17),
+      legend.text = element_text(size = 15))
+  return(p_weighted)
+}
+
+p_weighted <- plot_weighted_classification_data(weighted_df, sample_labels)
+
+ggsave("pacbio_qc_reads%_barplots.png", p_weighted, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+weighted_df <- combined_classification_df %>%
+  group_by(sample, structural_category, group_age, pool) %>%
+  summarise(total_FL = sum(FL, na.rm = TRUE)) %>%
+  group_by(sample) %>%
+  mutate(total_FL_sample = sum(total_FL),
+         percentage = (total_FL / total_FL_sample) * 100) %>%
+  ungroup()
+
+weighted_df$group_age <- factor(weighted_df$group_age, levels = c("young", "old"))
+weighted_df$pool <- factor(weighted_df$pool, levels = c("pool 1", "pool 2"))
+
+categories_df <- split(weighted_df, weighted_df$structural_category)
+
+structural_categories <- unique(percentage_df$structural_category)
+
+anova_results <- list()
+for (structural_category in structural_categories) {
+  res.aov2 <- aov(percentage ~ group_age * pool, data = categories_df[[structural_category]])
+  anova_results[[structural_category]] <- Anova(res.aov2, type = "III")
+  print(Anova(res.aov2, type = "III"))
+}
+extract_anova_results <- function(anova_results, number) {
+  lapply(names(anova_results), function(category) {
+    p_value <- anova_results[[category]]$`Pr(>F)`[number]
+    data.frame(category = category, p_value = as.numeric(p_value))
+  }) %>% bind_rows()
+}
+
+anova_results_df_age <- extract_anova_results(anova_results, 2)
+
+
+combined_df <- bind_rows(categories_df)
+p <- ggplot(combined_df, aes(x = group_age, y = percentage, fill = group_age, color = group_age)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Age group", y = "% of reads", fill = "Age group", color = "Age group") +
+  theme_minimal() +
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main") +
+  facet_wrap(~ structural_category, scales = "free_y") +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines") 
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.5)))
+
+ggsave("pacbio_qc_reads%_boxplots_age_group.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+
+p <- ggplot(combined_df, aes(x = pool, y = percentage, fill = pool, color = pool)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Pool", y = "% of reads", fill = "Pool", color = "Pool") +
+  theme_minimal() +
+  scale_fill_conesa(palette = "warm") +
+  scale_color_conesa(palette = "warm") +
+  facet_wrap(~ structural_category, scales = "free_y") +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines") 
+  ) +
+
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.5)))
+
+ggsave("pacbio_qc_reads%_boxplots_pool.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+agg_df <- combined_df %>%
+  group_by(structural_category, group_age, pool) %>%
+  summarize(avg_percentage = mean(percentage), .groups = 'drop')
+
+p <- ggplot(agg_df, aes(x = pool, y = avg_percentage, color = group_age, group = group_age)) +
+  geom_point(size = 3) +
+  geom_line(size = 1) +
+  facet_wrap(~ structural_category,scales = "free_y") +
+  labs(
+    x = "Pool",
+    y = "Mean % of reads",
+    color = "Age group",
+    linetype = "Age group"
+  ) +
+  scale_color_conesa(palette= "main") +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 10),
+    strip.background = element_rect(fill = "lightgray"),
+    panel.spacing = unit(1, "lines") 
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.5)))
+
+ggsave("pacbio_qc_reads%_interaction_plot.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+```
+
+
+
+## Structural categories percentages (after filtering with SQANTI3 filter)
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(RColorConesa)
+library(tidyr)  
+library(car)
+
+process_classification_file <- function(file) {
+  sample_name <- sub("_.*", "", basename(file))
+  df <- read.table(file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+  if ("filter_result" %in% colnames(df)) {
+    df <- df %>% filter(filter_result == "Isoform")
+  }
+  df$sample <- sample_name
+  return(df)
+}
+
+classification_files <- list.files("/home/carblan/Documents/R_files/TFM/filtered_classifications", pattern = "B", full.names = TRUE)
+
+classification_dfs <- lapply(classification_files, process_classification_file)
+combined_classification_df <- do.call(rbind, classification_dfs)
+
+combined_classification_df$structural_category <- dplyr::recode(combined_classification_df$structural_category,
+                                                         "full-splice_match" = "FSM",
+                                                         "incomplete-splice_match" = "ISM",
+                                                         "novel_in_catalog" = "NIC",
+                                                         "novel_not_in_catalog" = "NNC",
+                                                         "genic" = "Genic Genomic",
+                                                         "antisense" = "Antisense",
+                                                         "fusion" = "Fusion",
+                                                         "intergenic" = "Intergenic",
+                                                         "genic_intron" = "Genic Intron")
+
+combined_classification_df <- combined_classification_df %>%
+  mutate(group_age = case_when(
+    sample %in% c("B31", "B32", "B33", "B34", "B35") ~ "young",
+    sample %in% c("B151", "B152", "B153", "B154") ~ "old"
+  ),
+  pool = case_when(
+    sample %in% c("B31", "B32", "B33", "B151", "B152") ~ "pool 1",
+    sample %in% c("B34", "B35", "B153", "B154") ~ "pool 2"
+  ))
+
+plot_classification_data <- function(class_combined_df, sample_labels) {
+  p <- ggplot(class_combined_df, aes(x = sample, fill = structural_category)) +
+    geom_bar(position = "fill") +
+    scale_fill_conesa(palette = "complete", na.value = "grey", name = "Structural Category") +
+    scale_x_discrete(labels = sample_labels) +
+    theme_minimal() +
+    theme(legend.position = "right", axis.title.x = element_blank()) +
+    labs(x = "Sample",
+         y = "% of transcript models") +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 17),
+      axis.text.y = element_text(size = 17),
+      axis.title.x = element_text(size = 20),
+      axis.title.y = element_text(size = 20),
+      legend.title = element_text(size = 17),
+      legend.text = element_text(size = 15))
+  return(p)
+}
+
+sample_labels <- unique(combined_classification_df$sample)
+p <- plot_classification_data(combined_classification_df, sample_labels)
+
+ggsave("pacbio_filter_isoforms%_barplots.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+
+
+percentage_df <- combined_classification_df %>%
+  group_by(sample, structural_category, group_age, pool) %>%
+  summarise(count = n()) %>%
+  group_by(sample) %>%
+  mutate(total = sum(count),
+         percentage = (count / total) * 100) %>%
+  ungroup()
+
+percentage_df$group_age <- factor(percentage_df$group_age, levels = c("young", "old"))
+percentage_df$pool <- factor(percentage_df$pool, levels = c("pool 1", "pool 2"))
+
+
+categories_df <- split(percentage_df, percentage_df$structural_category)
+
+structural_categories <- unique(percentage_df$structural_category)
+
+anova_results <- list()
+for (structural_category in structural_categories) {
+  res.aov2 <- aov(percentage ~ group_age * pool, data = categories_df[[structural_category]])
+  anova_results[[structural_category]] <- Anova(res.aov2, type = "III")
+  print(Anova(res.aov2, type = "III"))
+}
+
+extract_anova_results <- function(anova_results, number) {
+  lapply(names(anova_results), function(category) {
+    p_value <- anova_results[[category]]$`Pr(>F)`[number]
+    data.frame(category = category, p_value = as.numeric(p_value))
+  }) %>% bind_rows()
+}
+
+anova_results_df_age <- extract_anova_results(anova_results, 2)
+
+combined_df <- bind_rows(categories_df)
+p <- ggplot(combined_df, aes(x = group_age, y = percentage, fill = group_age, color = group_age)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Age group", y = "% of transcript models", fill = "Age group", color = "Age group") +
+  theme_minimal() +
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main") +
+  facet_wrap(~ structural_category, scales = "free_y") +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines") 
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.5)))
+
+ggsave("pacbio_filter_isoforms%_boxplots_age_group.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+
+p <- ggplot(combined_df, aes(x = pool, y = percentage, fill = pool, color = pool)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Pool", y = "% of transcript models", fill = "Pool", color = "Pool") +
+  theme_minimal() +
+  scale_fill_conesa(palette = "warm") +
+  scale_color_conesa(palette = "warm") +
+  facet_wrap(~ structural_category, scales = "free_y") +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"),
+    panel.spacing = unit(1, "lines") 
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.5)))
+
+ggsave("pacbio_filter_isoforms%_boxplots_pool.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+agg_df <- combined_df %>%
+  group_by(structural_category, group_age, pool) %>%
+  summarize(avg_percentage = mean(percentage), .groups = 'drop')
+
+p <- ggplot(agg_df, aes(x = pool, y = avg_percentage, color = group_age, group = group_age)) +
+  geom_point(size = 3) +
+  geom_line(size = 1) +
+  facet_wrap(~ structural_category,scales = "free_y") +
+  labs(
+    x = "Pool",
+    y = "Mean % of transcript models",
+    color = "Age group",
+    linetype = "Age group"
+  ) +
+  scale_color_conesa(palette= "main") +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines") 
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.5)))
+
+ggsave("pacbio_filter_isoforms%_interaction_plot.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+
+## PARA LA VERSION CON READS
+weighted_df <- combined_classification_df %>%
+  group_by(sample, structural_category) %>%
+  summarise(total_FL = sum(FL, na.rm = TRUE)) %>%
+  ungroup()
+
+total_FL_per_sample <- weighted_df %>%
+  group_by(sample) %>%
+  summarise(total_sample_FL = sum(total_FL))
+
+weighted_df <- weighted_df %>%
+  left_join(total_FL_per_sample, by = "sample") %>%
+  mutate(weighted_percentage = total_FL / total_sample_FL)
+
+plot_weighted_classification_data <- function(weighted_df, sample_labels) {
+  p_weighted <- ggplot(weighted_df, aes(x = sample, y = weighted_percentage, fill = structural_category)) +
+    geom_bar(stat = "identity", position = "fill") +
+    scale_fill_conesa(palette = "complete", na.value = "grey", name = "Structural Category") +
+    scale_x_discrete(labels = sample_labels) +
+    theme_minimal() +
+    theme(legend.position = "right", axis.title.x = element_blank()) +
+    labs(x = "Sample",
+         y = "% of reads") +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 17),
+      axis.text.y = element_text(size = 17),
+      axis.title.x = element_text(size = 20),
+      axis.title.y = element_text(size = 20),
+      plot.title = element_text(size = 25, hjust = 0.5),
+      legend.title = element_text(size = 17),
+      legend.text = element_text(size = 15))
+  return(p_weighted)
+}
+
+p_weighted <- plot_weighted_classification_data(weighted_df, sample_labels)
+
+ggsave("pacbio_filter_reads%_barplots.png", p_weighted, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+weighted_df <- combined_classification_df %>%
+  group_by(sample, structural_category, group_age, pool) %>%
+  summarise(total_FL = sum(FL, na.rm = TRUE)) %>%
+  group_by(sample) %>%
+  mutate(total_FL_sample = sum(total_FL),
+         percentage = (total_FL / total_FL_sample) * 100) %>%
+  ungroup()
+
+weighted_df$group_age <- factor(weighted_df$group_age, levels = c("young", "old"))
+weighted_df$pool <- factor(weighted_df$pool, levels = c("pool 1", "pool 2"))
+
+
+categories_df <- split(weighted_df, weighted_df$structural_category)
+
+structural_categories <- unique(percentage_df$structural_category)
+
+anova_results <- list()
+for (structural_category in structural_categories) {
+  res.aov2 <- aov(percentage ~ group_age * pool, data = categories_df[[structural_category]])
+  anova_results[[structural_category]] <- Anova(res.aov2, type = "III")
+  print(Anova(res.aov2, type = "III"))
+}
+extract_anova_results <- function(anova_results, number) {
+  lapply(names(anova_results), function(category) {
+    p_value <- anova_results[[category]]$`Pr(>F)`[number]
+    data.frame(category = category, p_value = as.numeric(p_value))
+  }) %>% bind_rows()
+}
+
+anova_results_df_age <- extract_anova_results(anova_results, 2)
+
+
+
+combined_df <- bind_rows(categories_df)
+p <- ggplot(combined_df, aes(x = group_age, y = percentage, fill = group_age, color = group_age)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Age group", y = "% of reads", fill = "Age group", color = "Age group") +
+  theme_minimal() +
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main") +
+  facet_wrap(~ structural_category, scales = "free_y") +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines") 
+  ) +
+
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.5)))
+
+ggsave("pacbio_filter_reads%_boxplots_age_group.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+
+p <- ggplot(combined_df, aes(x = pool, y = percentage, fill = pool, color = pool)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Pool", y = "% of reads", fill = "Pool", color = "Pool") +
+  theme_minimal() +
+  scale_fill_conesa(palette = "warm") +
+  scale_color_conesa(palette = "warm") +
+  facet_wrap(~ structural_category, scales = "free_y") +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines") 
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.5)))
+
+ggsave("pacbio_filter_reads%_boxplots_pool.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+agg_df <- combined_df %>%
+  group_by(structural_category, group_age, pool) %>%
+  summarize(avg_percentage = mean(percentage), .groups = 'drop')
+
+p <- ggplot(agg_df, aes(x = pool, y = avg_percentage, color = group_age, group = group_age)) +
+  geom_point(size = 3) +
+  geom_line(size = 1) +
+  facet_wrap(~ structural_category,scales = "free_y") +
+  labs(
+    x = "Pool",
+    y = "Mean % of reads",
+    color = "Age group",
+    linetype = "Age group"
+  ) +
+  scale_color_conesa(palette= "main") +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"),
+    panel.spacing = unit(1, "lines")
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.5)))
+
+ggsave("pacbio_filter_reads%_interaction_plot.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+```
+
+
+##  Structural categories percentages (automatic resuce)
+
+```{r}
+process_classification_file <- function(file) {
+  sample_name <- sub("_.*", "", basename(file))
+  df <- read.table(file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+  if ("filter_result" %in% colnames(df)) {
+    df <- df %>% filter(filter_result == "Isoform")
+  }
+  df$sample <- sample_name
+  return(df)
+}
+
+process_gtf_file <- function(file) {
+  gtf_data <- read.table(file, header = FALSE, sep = "\t", stringsAsFactors = FALSE)
+  colnames(gtf_data) <- c("chr", "source", "feature", "start", "end", "score", "strand", "frame", "attribute")
+  
+  gtf_data$transcript_id <- str_match(gtf_data$attribute, 'transcript_id ([^;]+);')[,2]  
+  additional_transcripts <- unique(gtf_data$transcript_id[!grepl("^G\\d+\\.\\d+$", gtf_data$transcript_id)])
+  return(additional_transcripts)
+}
+
+classification_files <- list.files("/home/carblan/Documents/R_files/TFM/filtered_classifications", pattern = "B", full.names = TRUE)
+gtf_files <- list.files("/home/carblan/Documents/R_files/TFM/automatic_rescued_gtfs", pattern = "B", full.names = TRUE)
+
+classification_dfs <- lapply(classification_files, process_classification_file)
+combined_classification_df <- do.call(rbind, classification_dfs)
+
+for (gtf_file in gtf_files) {
+  sample_name <- sub("_.*", "", basename(gtf_file))
+  additional_transcripts <- process_gtf_file(gtf_file)
+  
+  additional_df <- data.frame(
+    isoform = additional_transcripts,
+    structural_category = "FSM",
+    sample = sample_name,
+    stringsAsFactors = FALSE
+  )
+  
+  additional_df <- additional_df %>% 
+    mutate(across(everything(), as.character)) %>%
+    mutate(across(everything(), ~ replace_na(.x, NA))) %>%
+    bind_rows(combined_classification_df[1,]) %>% 
+    select(colnames(combined_classification_df)) %>% 
+    slice(1:(n() - 1))
+  
+  combined_classification_df <- rbind(combined_classification_df, additional_df)
+}
+
+combined_classification_df$structural_category <- dplyr::recode(combined_classification_df$structural_category,
+                                                         "full-splice_match" = "FSM",
+                                                         "incomplete-splice_match" = "ISM",
+                                                         "novel_in_catalog" = "NIC",
+                                                         "novel_not_in_catalog" = "NNC",
+                                                         "genic" = "Genic Genomic",
+                                                         "antisense" = "Antisense",
+                                                         "fusion" = "Fusion",
+                                                         "intergenic" = "Intergenic",
+                                                         "genic_intron" = "Genic Intron")
+
+combined_classification_df <- combined_classification_df %>%
+  mutate(group_age = case_when(
+    sample %in% c("B31", "B32", "B33", "B34", "B35") ~ "young",
+    sample %in% c("B151", "B152", "B153", "B154") ~ "old"
+  ),
+  pool = case_when(
+    sample %in% c("B31", "B32", "B33", "B151", "B152") ~ "pool 1",
+    sample %in% c("B34", "B35", "B153", "B154") ~ "pool 2"
+  ))
+
+
+plot_classification_data <- function(class_combined_df, sample_labels) {
+  p <- ggplot(class_combined_df, aes(x = sample, fill = structural_category)) +
+    geom_bar(position = "fill") +
+    scale_fill_conesa(palette = "complete", na.value = "grey", name = "Structural Category") +
+    scale_x_discrete(labels = sample_labels) +
+    theme_minimal() +
+    theme(legend.position = "right", axis.title.x = element_blank()) +
+    labs(x = "Sample",
+         y = "% of transcript models") +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 17),
+      axis.text.y = element_text(size = 17),
+      axis.title.x = element_text(size = 20),
+      axis.title.y = element_text(size = 20),
+      legend.title = element_text(size = 17),
+      legend.text = element_text(size = 15))
+  return(p)
+}
+
+sample_labels <- unique(combined_classification_df$sample)
+p <- plot_classification_data(combined_classification_df, sample_labels)
+
+ggsave("pacbio_rescue_isoforms%_barplots.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+
+percentage_df <- combined_classification_df %>%
+  group_by(sample, structural_category, group_age, pool) %>%
+  summarise(count = n()) %>%
+  group_by(sample) %>%
+  mutate(total = sum(count),
+         percentage = (count / total) * 100) %>%
+  ungroup()
+
+percentage_df$group_age <- factor(percentage_df$group_age, levels = c("young", "old"))
+percentage_df$pool <- factor(percentage_df$pool, levels = c("pool 1", "pool 2"))
+
+
+categories_df <- split(percentage_df, percentage_df$structural_category)
+
+structural_categories <- unique(percentage_df$structural_category)
+
+anova_results <- list()
+for (structural_category in structural_categories) {
+  res.aov2 <- aov(percentage ~ group_age * pool, data = categories_df[[structural_category]])
+  anova_results[[structural_category]] <- Anova(res.aov2, type = "III")
+  print(Anova(res.aov2, type = "III"))
+}
+
+
+extract_anova_results <- function(anova_results, number) {
+  lapply(names(anova_results), function(category) {
+    p_value <- anova_results[[category]]$`Pr(>F)`[number]
+    data.frame(category = category, p_value = as.numeric(p_value))
+  }) %>% bind_rows()
+}
+
+anova_results_df_age <- extract_anova_results(anova_results, 2)
+
+combined_df <- bind_rows(categories_df)
+p <- ggplot(combined_df, aes(x = group_age, y = percentage, fill = group_age, color = group_age)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Age group", y = "% of transcript models", fill = "Age group", color = "Age group") +
+  theme_minimal() +
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main") +
+  facet_wrap(~ structural_category, scales = "free_y") +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines") 
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.5)))
+
+ggsave("pacbio_rescue_isoforms%_boxplots_age_group.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+
+p <- ggplot(combined_df, aes(x = pool, y = percentage, fill = pool, color = pool)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Pool", y = "% of transcript models", fill = "Pool", color = "Pool") +
+  theme_minimal() +
+  scale_fill_conesa(palette = "warm") +
+  scale_color_conesa(palette = "warm") +
+  facet_wrap(~ structural_category, scales = "free_y") +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines")
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.5)))
+
+ggsave("pacbio_rescue_isoforms%_boxplots_pool.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+agg_df <- combined_df %>%
+  group_by(structural_category, group_age, pool) %>%
+  summarize(avg_percentage = mean(percentage), .groups = 'drop')
+
+p <- ggplot(agg_df, aes(x = pool, y = avg_percentage, color = group_age, group = group_age)) +
+  geom_point(size = 3) +
+  geom_line(size = 1) +
+  facet_wrap(~ structural_category,scales = "free_y") +
+  labs(
+    x = "Pool",
+    y = "Mean % of transcript models",
+    color = "Age group",
+    linetype = "Age group"
+  ) +
+  scale_color_conesa(palette= "main") +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 10),
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines") 
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.5)))
+
+ggsave("pacbio_rescue_isoforms%_interaction_plot.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+
+## PARA LA VERSION CON READS
+weighted_df <- combined_classification_df %>%
+  group_by(sample, structural_category) %>%
+  summarise(total_FL = sum(FL, na.rm = TRUE)) %>%
+  ungroup()
+
+total_FL_per_sample <- weighted_df %>%
+  group_by(sample) %>%
+  summarise(total_sample_FL = sum(total_FL))
+
+weighted_df <- weighted_df %>%
+  left_join(total_FL_per_sample, by = "sample") %>%
+  mutate(weighted_percentage = total_FL / total_sample_FL)
+
+plot_weighted_classification_data <- function(weighted_df, sample_labels) {
+  p_weighted <- ggplot(weighted_df, aes(x = sample, y = weighted_percentage, fill = structural_category)) +
+    geom_bar(stat = "identity", position = "fill") +
+    scale_fill_conesa(palette = "complete", na.value = "grey", name = "Structural Category") +
+    scale_x_discrete(labels = sample_labels) +
+    theme_minimal() +
+    theme(legend.position = "right", axis.title.x = element_blank()) +
+    labs(x = "Sample",
+         y = "% of reads") +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 17),
+      axis.text.y = element_text(size = 17),
+      axis.title.x = element_text(size = 20),
+      axis.title.y = element_text(size = 20),
+      plot.title = element_text(size = 25, hjust = 0.5),
+      legend.title = element_text(size = 17),
+      legend.text = element_text(size = 15))
+  return(p_weighted)
+}
+
+p_weighted <- plot_weighted_classification_data(weighted_df, sample_labels)
+
+ggsave("pacbio_rescue_reads%_barplots.png", p_weighted, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+weighted_df <- combined_classification_df %>%
+  group_by(sample, structural_category, group_age, pool) %>%
+  summarise(total_FL = sum(FL, na.rm = TRUE)) %>%
+  group_by(sample) %>%
+  mutate(total_FL_sample = sum(total_FL),
+         percentage = (total_FL / total_FL_sample) * 100) %>%
+  ungroup()
+
+weighted_df$group_age <- factor(weighted_df$group_age, levels = c("young", "old"))
+weighted_df$pool <- factor(weighted_df$pool, levels = c("pool 1", "pool 2"))
+
+categories_df <- split(weighted_df, weighted_df$structural_category)
+
+structural_categories <- unique(percentage_df$structural_category)
+
+anova_results <- list()
+for (structural_category in structural_categories) {
+  res.aov2 <- aov(percentage ~ group_age * pool, data = categories_df[[structural_category]])
+  anova_results[[structural_category]] <- Anova(res.aov2, type = "III")
+  print(Anova(res.aov2, type = "III"))
+}
+extract_anova_results <- function(anova_results, number) {
+  lapply(names(anova_results), function(category) {
+    p_value <- anova_results[[category]]$`Pr(>F)`[number]
+    data.frame(category = category, p_value = as.numeric(p_value))
+  }) %>% bind_rows()
+}
+
+anova_results_df_age <- extract_anova_results(anova_results, 2)
+
+combined_df <- bind_rows(categories_df)
+p <- ggplot(combined_df, aes(x = group_age, y = percentage, fill = group_age, color = group_age)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Age group", y = "% of reads", fill = "Age group", color = "Age group") +
+  theme_minimal() +
+  scale_fill_conesa(palette = "main") +
+  scale_color_conesa(palette = "main") +
+  facet_wrap(~ structural_category, scales = "free_y") +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines")
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.5)))
+
+ggsave("pacbio_rescue_reads%_boxplots_age_group.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+
+p <- ggplot(combined_df, aes(x = pool, y = percentage, fill = pool, color = pool)) +
+  geom_boxplot(alpha = 0.5) +
+  labs(x = "Pool", y = "% of reads", fill = "Pool", color = "Pool") +
+  theme_minimal() +
+  scale_fill_conesa(palette = "warm") +
+  scale_color_conesa(palette = "warm") +
+  facet_wrap(~ structural_category, scales = "free_y") +
+  theme(
+    strip.text = element_text(size = 10), 
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines") 
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.5)))
+
+ggsave("pacbio_rescue_reads%_boxplots_pool.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+
+agg_df <- combined_df %>%
+  group_by(structural_category, group_age, pool) %>%
+  summarize(avg_percentage = mean(percentage), .groups = 'drop')
+
+p <- ggplot(agg_df, aes(x = pool, y = avg_percentage, color = group_age, group = group_age)) +
+  geom_point(size = 3) +
+  geom_line(size = 1) +
+  facet_wrap(~ structural_category,scales = "free_y") +
+  labs(
+    x = "Pool",
+    y = "Mean % of reads",
+    color = "Age group",
+    linetype = "Age group"
+  ) +
+  scale_color_conesa(palette= "main") +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 10),
+    strip.background = element_rect(fill = "lightgray"), 
+    panel.spacing = unit(1, "lines") 
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.5, 0.5)))
+
+ggsave("pacbio_rescue_reads%_interaction_plot.png", p, path = "/home/carblan/Documents/R_files/TFM/figures")
+```
